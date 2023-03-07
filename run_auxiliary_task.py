@@ -79,7 +79,7 @@ config = {
     # "PGD_K": 3,
     # "span_task":True,
   	# "span_labels"" True,
-    "data_folder": "datasets/nlpaueb/legal-bert-base-uncased",
+    "data_folder": "datasets/legaleval",
     "task_folder_name": ""
     # "labels": ["mask", "RLC", "ANALYSIS", "FAC", "OTHERS"]
 }

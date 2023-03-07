@@ -3,7 +3,7 @@ from allennlp.modules.seq2seq_encoders import PytorchSeq2SeqWrapper
 from allennlp.nn.util import masked_mean, masked_softmax
 import copy
 
-from transformers import BertModel, DebertaV2Model
+from transformers import BertModel
 
 from transformers import BertTokenizer
 from bert_model import BertModel as BertModelC

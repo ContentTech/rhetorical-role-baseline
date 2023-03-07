@@ -39,7 +39,7 @@ def calc_classification_metrics(y_true, y_predicted, labels):
 
 
 
-def eval_model(model, eval_batches, device, task):
+def eval_model(model, eval_batches, device, task, config):
     model.eval()
     true_labels = []
     labels_dict={}
