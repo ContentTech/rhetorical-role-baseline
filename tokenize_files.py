@@ -3,9 +3,13 @@
 import sys
 from transformers import BertTokenizer
 import json
+import os
 from sklearn.model_selection import train_test_split
-BERT_VOCAB = "bert-base-uncased"
-MAX_SEQ_LENGTH = 128
+# BERT_VOCAB = "bert-base-uncased"
+MAX_SEQ_LENGTH = 256
+BASEDIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# BERT_VOCAB = os.path.join(BASEDIR, "bert-base-uncased")
+BERT_VOCAB = os.path.join(BASEDIR, "zlucia-legalbert")
 
 
 def write_in_hsln_format(input,hsln_format_txt_dirpath,tokenizer):
@@ -22,9 +26,9 @@ def write_in_hsln_format(input,hsln_format_txt_dirpath,tokenizer):
 
             sentence_txt=annotation['value']['text']
             sentence_label = annotation['value']['labels'][0]
-            sentence_txt = sentence_txt.replace("\r", "")
+            sentence_txt = ' '.join(sentence_txt.strip().replace("\r", "").replace("\n", " ").replace('<\/s>', ' ').split())
             if sentence_txt.strip() != "":
-                sent_tokens = tokenizer.encode(sentence_txt, add_special_tokens=True, max_length=128)
+                sent_tokens = tokenizer.encode(sentence_txt, add_special_tokens=True, max_length=MAX_SEQ_LENGTH, truncation=True)
                 sent_tokens = [str(i) for i in sent_tokens]
                 sent_tokens_txt = " ".join(sent_tokens)
                 final_string = final_string + sentence_label + "\t" + sent_tokens_txt + "\n"

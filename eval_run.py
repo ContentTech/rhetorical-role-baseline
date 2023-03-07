@@ -3,7 +3,7 @@ import json
 import pandas as pd
 import numpy as np
 import os
-from task import pubmed_task
+from task import legaleval_task, pubmed_task
 import re
 import matplotlib
 matplotlib.use('Agg')
@@ -119,17 +119,18 @@ def create_generic_task(task_name):
 
 def get_all_tasks():
     result = []
-    result.append(pubmed_task(train_batch_size=-1, max_docs=-1))
-    result.append(pubmed_task_small(train_batch_size=-1, max_docs=-1))
-    result.append(nicta_task(train_batch_size=-1, max_docs=-1))
-    result.append(dri_task(train_batch_size=-1, max_docs=-1))
-    result.append(art_task(train_batch_size=-1, max_docs=-1))
-    result.append(art_task_small(train_batch_size=-1, max_docs=-1))
-
-    result.append(create_generic_task(GEN_DRI_TASK))
-    result.append(create_generic_task(GEN_PMD_TASK))
-    result.append(create_generic_task(GEN_NIC_TASK))
-    result.append(create_generic_task(GEN_ART_TASK))
+    result.append(legaleval_task(train_batch_size=-1, max_docs=-1))
+    # result.append(pubmed_task(train_batch_size=-1, max_docs=-1))
+    # result.append(pubmed_task_small(train_batch_size=-1, max_docs=-1))
+    # result.append(nicta_task(train_batch_size=-1, max_docs=-1))
+    # result.append(dri_task(train_batch_size=-1, max_docs=-1))
+    # result.append(art_task(train_batch_size=-1, max_docs=-1))
+    # result.append(art_task_small(train_batch_size=-1, max_docs=-1))
+    #
+    # result.append(create_generic_task(GEN_DRI_TASK))
+    # result.append(create_generic_task(GEN_PMD_TASK))
+    # result.append(create_generic_task(GEN_NIC_TASK))
+    # result.append(create_generic_task(GEN_ART_TASK))
 
     return result
 
@@ -162,7 +163,7 @@ def calc_f1(cm):
     precision = true_pos / (true_pos + false_pos)
     recall = true_pos / (true_pos + false_neg)
     f1 = 2 * (precision * recall) / (precision + recall)
-    return f1
+    return precision, recall, f1
 
 
 def load_confusion_matrix(run_path, task_name, absolute=True):
@@ -191,9 +192,13 @@ def eval_and_save_metrics(path):
     Besides a confusion matrix is calculated for each task and saved as "{task_name}_cm.pdf".
     :param path: Path to the run. In this path also the files are saved,
     '''
+    from termcolor import colored
+    print(colored(path, 'red'))
     tasks_in_run = load_tasks_in_run(path)
+    print(colored(tasks_in_run, 'red'))
     task_metrics = []
     for task in tasks_in_run:
+        print(colored(task, 'red'))
         task_results = load_best_results(path, task)
         means = np.round(np.mean(np.array(task_results) * 100, axis=0), 2)
         stds = np.round(np.std(np.array(task_results) * 100, axis=0), 3)
@@ -216,13 +221,13 @@ def eval_and_save_metrics(path):
             title=t,
             normalize=True,
             filename=os.path.join(path, f'{t}_cm.pdf'))
-        f1s = calc_f1(task_cm_abs)
-        for i, f1 in enumerate(f1s):
+        precisions, recalls, f1s = calc_f1(task_cm_abs)
+        for i, (p, r, f1) in enumerate(zip(precisions, recalls, f1s)):
             label_name = get_task(t).labels[1:][i]
             label_order = get_task(t).labels_pres.index(label_name)
-            f1_per_class.append([t, label_order, label_name.title(), f1])
+            f1_per_class.append([t, label_order, label_name.title(), p, r, f1])
 
-    f1_per_label_df = pd.DataFrame(f1_per_class, columns=["task", "order", "label", "F1"])
+    f1_per_label_df = pd.DataFrame(f1_per_class, columns=["task", "order", "label", "precision", "recall", "F1"])
     f1_per_label_df = f1_per_label_df.sort_values(by=["task", "order"])
     f1_per_label_df.to_csv(os.path.join(path, "f1_per_label.csv"))
 

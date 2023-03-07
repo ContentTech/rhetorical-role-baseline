@@ -3,9 +3,9 @@ from allennlp.common.util import pad_sequence_to_length
 import bucketing as bucketing
 import torch
 import numpy as np
-
+import time
 class BatchCreator:
-    def __init__(self, dataset, tokenizer, labels, batch_sentence_size, max_seq_length):
+    def __init__(self, dataset, tokenizer, labels, batch_sentence_size, max_seq_length, auxiliary_labels=None):
         #'''dataset: Iterable over documents
         #   tokenizer: WordPiece tokenizer of BERT. If None, then it is assumed that sentences are already tokenized.
         #   labels: possible lables of the sentences
@@ -13,6 +13,7 @@ class BatchCreator:
         #'''
         self.dataset = dataset
         self.labels = labels
+        self.auxiliary_labels = auxiliary_labels
         self.batch_sentence_size = batch_sentence_size
         self.max_sequence_length = max_seq_length
         self.tokenizer = tokenizer
@@ -68,20 +69,27 @@ class BatchCreator:
         return result
 
     def document_to_sequence_example(self, document, sentence_padding_len):
-
         sentences = list(document.data.sentences)
         labels = list(document.data.labels)
-
-
+        start_tokens = list(document.data.start_ids)
+        end_tokens =list(document.data.end_ids)
+        auxiliary_labels = ["mask" * len(labels)]
+        if getattr(document.data, "auxiliary_labels"):
+            auxiliary_labels = list(document.data.auxiliary_labels)
         # pad number of sentences
         for _ in range(len(document.data.labels), sentence_padding_len):
             sentences.append("")
             labels.append("mask")
+            start_tokens.append("mask")
+            end_tokens.append("mask")
+            auxiliary_labels.append("mask")
 
         token_ids = []
         attention_masks = []
         label_ids = []
-        for sentence, label in zip(sentences, labels):
+        start_ids, end_ids = [], []
+        auxiliary_labels_ids = []
+        for sentence, label, start_token, end_token, auxiliary_label in zip(sentences, labels, start_tokens, end_tokens, auxiliary_labels):
             if self.tokenizer is None:
                 # sentence already tokenized
                 if isinstance(sentence, list):
@@ -94,17 +102,25 @@ class BatchCreator:
             attention_mask = [1] * len(tok_ids)
 
             # map label id
-            label_id = self.labels.index(label)
-
+            label_id = self.labels.index(label) if label in self.labels else 1
+            start_id = self.labels.index(start_token)
+            end_id = self.labels.index(end_token)
             token_ids.append(tok_ids)
             attention_masks.append(attention_mask)
             label_ids.append(label_id)
+            start_ids.append(start_id)
+            end_ids.append(end_id)
+            if self.auxiliary_labels:
+                auxiliary_labels_ids.append(self.auxiliary_labels.index(auxiliary_label))
 
         return {
             "sentence_mask": pad_sequence_to_length([1] * document.length, desired_length=sentence_padding_len),
             "input_ids": token_ids,
             "attention_mask": attention_masks,
             "label_ids": label_ids,
+            "start_ids": start_ids,
+            "end_ids": end_ids,
+            "auxiliary_labels_ids": auxiliary_labels_ids,
             "doc_name": document.data.doc_name
         }
 

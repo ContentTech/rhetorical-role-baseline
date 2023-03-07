@@ -6,7 +6,7 @@ import sys
 # as per the metadata file, input and output directories are the arguments
 from sklearn.metrics import precision_recall_fscore_support
 
-[_, ground_truth_path, input_json_path] = sys.argv
+[_, ground_truth_path, input_json_path, outpout_file] = sys.argv
 
 # unzipped submission data is always in the 'res' subdirectory
 # https://github.com/codalab/codalab-competitions/wiki/User_Building-a-Scoring-Program-for-a-Competition#directory-structure-for-submissions
@@ -47,6 +47,9 @@ precision, recall, f1, _ = precision_recall_fscore_support(ground_truth_labels, 
 
 # the scores for the leaderboard must be in a file named "scores.txt"
 # https://github.com/codalab/codalab-competitions/wiki/User_Building-a-Scoring-Program-for-a-Competition#directory-structure-for-submissions
-with open(os.path.join('result.json'), 'w') as output_file:
-    json.dump({"Weighted-F1": f1}, output_file)
+with open(os.path.join(outpout_file), 'w') as output_file:
+    output_file.write("labels\tpredictions\n")
+    for l, p in zip(ground_truth_labels, submission_lables):
+        output_file.write(f"{l}\t{p}\n")
+    json.dump({"precision": precision, "recall": recall, "Weighted-F1": f1}, output_file)
 

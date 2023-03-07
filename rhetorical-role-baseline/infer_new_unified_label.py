@@ -1,3 +1,5 @@
+#!/usr/bin/python
+# -*- coding:utf-8 -*-
 import models
 import json
 import sys
@@ -8,7 +10,7 @@ import pandas as pd
 import models
 from eval import eval_model
 from models import BertHSLN, BertHSLNWithAuxiliaryTask
-from task import pubmed_task
+from task import pubmed_task, legaleval_task, y2019b7_task
 from utils import get_device
 
 torch_device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -22,7 +24,7 @@ def infer(model_path, max_docs, prediction_output_json_path, device, config):
     def create_task(create_func):
         return create_func(train_batch_size=config["batch_size"], max_docs=MAX_DOCS)
 
-    task = create_task(pubmed_task)
+    task = create_task(legaleval_task)
 
     # model = getattr(models, config["model"])(config, [task, task1]).to(device)
     model = getattr(models, config["model"])(config, [task]).to(device)
@@ -99,8 +101,7 @@ if __name__ == "__main__":
     config = {
         "bert_model": BERT_MODEL,
         "bert_trainable": False,
-        # "model": BertHSLNWithAuxiliaryTask.__name__,
-        "model": BertHSLN.__name__,
+        "model": BertHSLNWithAuxiliaryTask.__name__,
         "cacheable_tasks": [],
 
         "dropout": 0.5,
@@ -113,17 +114,15 @@ if __name__ == "__main__":
         "batch_size": 32,
         "max_seq_length": 256,
         "max_epochs": 40,
-        "early_stopping": 5,
-        # "auxiliary_task": 'bioe',
-        # "mu": 0.3
+        "early_stopping": 5
     }
 
     MAX_DOCS = -1
     device = get_device(0)
 
-    hsln_format_txt_dirpath = 'datasets/pubmed-20k'
+    hsln_format_txt_dirpath = 'datasets/legaleval'
     # write_in_hsln_format(input_dir, hsln_format_txt_dirpath, tokenizer)
-    filename_sent_boundries = json.load(open(hsln_format_txt_dirpath + '/sentece_boundries.json'))
+    filename_sent_boundries = json.load(open(hsln_format_txt_dirpath + '/test_sentece_boundries.json'))
     predictions = infer(model_path, MAX_DOCS, prediction_output_json_path, device, config)
 
     ##### write the output in format needed by revision script

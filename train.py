@@ -2,6 +2,8 @@ from prettytable import PrettyTable
 from torch.optim import Adam
 from torch.optim.lr_scheduler import StepLR
 
+from torch.optim import lr_scheduler
+from termcolor import colored
 
 import torch
 import random
@@ -16,9 +18,54 @@ from utils import tensor_dict_to_gpu, tensor_dict_to_cpu, ResultWriter, get_num_
 from task import Task, Fold
 import gc
 import copy
+# random.seed(1)
+
+
+class FGM():
+    def __init__(self, model):
+        self.model = model
+        self.backup = {}
+
+    def attack(self, epsilon=0.3, emb_name=''):
+        # emb_name这个参数要换成你模型中embedding的参数名
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and emb_name in name:
+                self.backup[name] = param.data.clone()
+                norm = torch.norm(param.grad)
+                if norm != 0 and not torch.isnan(norm):
+                    r_at = epsilon * param.grad / norm
+                    param.data.add_(r_at)
+
+    def restore(self, emb_name=''):
+        # emb_name这个参数要换成你模型中embedding的参数名
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and emb_name in name:
+                #这里加入fgm restore判断是否恢复参数了
+                assert name in self.backup
+                param.data = self.backup[name]
+        self.backup = {}
+
+
+class CosineWarmupScheduler(lr_scheduler._LRScheduler):
+
+    def __init__(self, optimizer, warmup, max_iters):
+        self.warmup = warmup
+        self.max_num_iters = max_iters
+        super().__init__(optimizer)
+
+    def get_lr(self):
+        lr_factor = self.get_lr_factor(epoch=self.last_epoch)
+        return [base_lr * lr_factor for base_lr in self.base_lrs]
+
+    def get_lr_factor(self, epoch):
+        lr_factor = 0.5 * (1 + np.cos(np.pi * epoch / self.max_num_iters))
+        if epoch <= self.warmup:
+            lr_factor *= epoch * 1.0 / self.warmup
+        return lr_factor
 
 class SentenceClassificationTrainer:
     '''Trainer for baseline model and also for Sequantial Transfer Learning. '''
+
     def __init__(self, device, config, task: Task, result_writer:ResultWriter):
         self.device = device
         self.config = config
@@ -29,6 +76,12 @@ class SentenceClassificationTrainer:
 
         self.labels = task.labels
         self.task = task
+        print(colored(self.config, 'green'))
+        print(colored(self.config['model'], 'green'))
+        print(colored(self.labels, 'green'))
+        print(colored(self.task.task_name, 'green'))
+        print(colored(self.task.dev_metric, 'green'))
+
 
     def write_results(self, fold_num, epoch, train_duration, dev_metrics, dev_confusion, test_metrics, test_confusion):
         self.cur_result["fold"] = fold_num
@@ -73,15 +126,19 @@ class SentenceClassificationTrainer:
 
         self.result_writer.log(f"Number of model parameters: {get_num_model_parameters(model)}")
         self.result_writer.log(f"Number of model parameters bert: {get_num_model_parameters(model.bert)}")
-        self.result_writer.log(f"Number of model parameters word_lstm: {get_num_model_parameters(model.word_lstm)}")
-        self.result_writer.log(f"Number of model parameters attention_pooling: {get_num_model_parameters(model.attention_pooling)}")
-        self.result_writer.log(f"Number of model parameters sentence_lstm: {get_num_model_parameters(model.sentence_lstm)}")
+        # self.result_writer.log(f"Number of model parameters word_lstm: {get_num_model_parameters(model.word_lstm)}")
+        # self.result_writer.log(f"Number of model parameters attention_pooling: {get_num_model_parameters(model.attention_pooling)}")
+        # self.result_writer.log(f"Number of model parameters sentence_lstm: {get_num_model_parameters(model.sentence_lstm)}")
+        # self.result_writer.log(f"Number of model parameters sentence_attention: {get_num_model_parameters(model.multihead_attn)}")
         self.result_writer.log(f"Number of model parameters crf: {get_num_model_parameters(model.crf)}")
         print_model_parameters(model)
 
+        # Creates a GradScaler once at the beginning of training.
+        scaler = torch.cuda.amp.GradScaler()
         # for feature based training use Adam optimizer with lr decay after each epoch (see Jin et al. Paper)
         optimizer = Adam(model.parameters(), lr=lr)
         epoch_scheduler = StepLR(optimizer, step_size=1, gamma=self.config["lr_epoch_decay"])
+        # epoch_scheduler = CosineWarmupScheduler(optimizer=optimizer, warmup=self.config.get("warmup", 200), max_iters=self.config.get("max_iters", 2000))
 
         best_dev_result = 0.0
         early_stopping_counter = 0
@@ -89,6 +146,10 @@ class SentenceClassificationTrainer:
         early_stopping = self.config["early_stopping"]
         best_model = None
         optimizer.zero_grad()
+
+        if self.config.get("fgm", False):
+            fgm = FGM(model)
+
         while epoch < max_train_epochs and early_stopping_counter < early_stopping:
             epoch_start = time.time()
 
@@ -101,17 +162,84 @@ class SentenceClassificationTrainer:
                 # move tensor to gpu
                 tensor_dict_to_gpu(batch, self.device)
 
-                output = model(
-                    batch=batch,
-                    labels=batch["label_ids"]
-                )
-                loss = output["loss"]
-                loss = loss.sum()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-                optimizer.step()
-                optimizer.zero_grad()
+                # Runs the forward pass with autocasting.
+                ctype = self.config.get("dtype", None)
+                ctpye = torch.float16 if ctype is not None and ctype == "float16" else torch.float32
+                with torch.cuda.amp.autocast(dtype=ctpye):
+                    if self.config.get('auxiliary_task', None) is not None:
+                        output = model(
+                            batch=batch,
+                            labels=batch["label_ids"],
+                            auxiliary_labels=batch["auxiliary_labels_ids"]
+                        )
+                    else:
+                        output = model(
+                            batch=batch,
+                            labels=batch["label_ids"]
+                        )
+                    loss = output["loss"]
+                    if self.config.get('use_multi_loss', 0) > 0:
+                        loss = loss.sum()
+                    else:
+                        if 'auxiliary_loss' in output and output['auxiliary_loss'] is not None:
+                            auxiliary_loss = output["auxiliary_loss"]
+                            mu = self.config.get('mu', 0)
+                            # loss = torch.add(loss, torch.mul(auxiliary_loss, mu))
+                            loss = torch.add(torch.mul(loss, (1 - mu)), torch.mul(auxiliary_loss, mu))
+                        if 'contrastive_loss' in output and output['contrastive_loss'] is not None:
+                            lamda = self.config.get('lamda', 0)
+                            contrastive_loss = output['contrastive_loss']
+                            loss = loss.sum() + lamda * contrastive_loss
+                            # loss = torch.add(torch.mul(loss, (1 - lamda)), torch.mul(contrastive_loss, lamda))
+                        if "label_contrastive_loss" in output and output['label_contrastive_loss'] is not None:
+                            lamda = self.config.get('lamda', 0)
+                            label_contrastive_loss = output['label_contrastive_loss']
+                            loss = torch.add(torch.mul(loss, (1 - lamda)), torch.mul(label_contrastive_loss, lamda))
+                        if "discount_label_loss" in output and output["discount_label_loss"] is not None:
+                            lamda = self.config.get('lamda', 0)
+                            discount_label_loss = output['discount_label_loss']
+                            loss = torch.add(torch.mul(loss, (1 - lamda)), torch.mul(discount_label_loss, lamda))
+                        loss = loss.sum()
 
+                accumulation_steps = self.config.get("accumulation_steps", 0)
+                if accumulation_steps > 0:
+                    loss = loss/accumulation_steps
+
+                # Scales loss.  Calls backward() on scaled loss to create scaled gradients.
+                # Backward passes under autocast are not recommended.
+                # Backward ops run in the same dtype autocast chose for corresponding forward ops.
+                scaler.scale(loss).backward(retain_graph=True)
+
+                # loss.backward()
+                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                # optimizer.step()
+
+                if self.config.get("fgm", False):
+                    # 对抗训练
+                    fgm.attack()  # 在embedding上添加对抗扰动
+                    output = model(batch=batch, labels=batch["label_ids"])
+                    loss_adv = output["loss"]
+                    scaler.scale(loss_adv).backward(retain_graph=True)
+                    # loss_adv.backward()  # 反向传播，并在正常的grad基础上，累加对抗训练的梯度
+                    fgm.restore()  # 恢复embedding参数
+                    # optimizer.step()  # 梯度下降，更新参数
+                    # model.zero_grad()
+
+                if accumulation_steps > 0:
+                    if (batch_num+1) % accumulation_steps == 0:
+                        scaler.unscale_(optimizer) # Unscales the gradients of optimizer's assigned params in-place
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm) # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
+                        # optimizer's gradients are already unscaled, so scaler.step does not unscale them,
+                        # although it still skips optimizer.step() if the gradients contain infs or NaNs.
+                        scaler.step(optimizer)
+                        scaler.update()
+                        optimizer.zero_grad()
+                else:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                    scaler.step(optimizer)
+                    scaler.update() # Updates the scale for next iteration.
+                    optimizer.zero_grad()
                 # move batch to cpu again to save gpu memory
                 tensor_dict_to_cpu(batch)
 
@@ -125,7 +253,7 @@ class SentenceClassificationTrainer:
             # evaluate model
             results={}
             self.result_writer.log(f'evaluating model...')
-            dev_metrics, dev_confusion,labels_dict, _ = eval_model(model, dev_batches, self.device, self.task)
+            dev_metrics, dev_confusion, labels_dict, _ = eval_model(model, dev_batches, self.device, self.task, self.config)
             results['dev_metrics']=dev_metrics
             results['dev_confusion'] = dev_confusion
             results['labels_dict'] = labels_dict
@@ -139,7 +267,7 @@ class SentenceClassificationTrainer:
                 early_stopping_counter = 0
                 self.result_writer.log(f"New best dev {self.task.dev_metric} {best_dev_result}!")
                 results={}
-                test_metrics, test_confusion,labels_dict,_ = eval_model(model, test_batches, self.device, self.task)
+                test_metrics, test_confusion, labels_dict, _ = eval_model(model, test_batches, self.device, self.task, self.config)
                 results['dev_metrics']=dev_metrics
                 results['dev_confusion'] = dev_confusion
                 results['labels_dict'] = labels_dict
@@ -251,8 +379,8 @@ class SentenceClassificationMultitaskTrainer:
             weighted_f1_dev_scores = []
             for task in self.tasks:
                 self.result_writer.log(f'evaluating model for task {task.task_name}...')
-                dev_metrics, dev_confusion, _ = eval_model(model, dev_batches, self.device, task)
-                test_metrics, test_confusion, _ = eval_model(model, test_batches, self.device, task)
+                dev_metrics, dev_confusion, labels_dict, _ = eval_model(model, dev_batches, self.device, task, self.config)
+                test_metrics, test_confusion, labels_dict, _ = eval_model(model, test_batches, self.device, task, self.config)
                 self.write_results(task, epoch, train_duration, dev_metrics, dev_confusion, test_metrics, test_confusion)
                 self.result_writer.log(
                     f'epoch: {epoch}, train duration: {train_duration}, dev weighted f1: {dev_metrics["weighted-f1"]}, dev {task.dev_metric}: {dev_metrics[task.dev_metric]}, test weighted-F1: {test_metrics["weighted-f1"]}, test micro-F1: {test_metrics["micro-f1"]}. test macro-F1: {test_metrics["macro-f1"]}, test accuracy: {test_metrics["acc"]}')
